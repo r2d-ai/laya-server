@@ -19,7 +19,17 @@ curl http://localhost:8000/readyz
 curl http://localhost:8000/v1/info
 ```
 
-The image uses CUDA 12.6 and PyTorch 2.14's `cu126` wheel. Models are cached in the `laya-hf-cache` volume.
+The default image uses NVIDIA CUDA 13.0.2 + cuDNN and PyTorch 2.14's `cu130` wheel. CUDA 13 is required by default because RTX 50-series / Blackwell consumer GPUs such as the RTX 5060 Ti use compute capability 12.0 (`sm_120`), which is not included in PyTorch's `cu126` build. Models are cached in the `laya-hf-cache` volume.
+
+The Dockerfile exposes build args if a different supported CUDA/PyTorch combination is needed:
+
+```bash
+docker build \
+  --build-arg CUDA_IMAGE=13.0.2-cudnn-runtime-ubuntu24.04 \
+  --build-arg TORCH_VERSION=2.14.0 \
+  --build-arg TORCH_CUDA=cu130 \
+  -t laya-server .
+```
 
 ## Endpoints
 
