@@ -1,0 +1,21 @@
+services:
+  laya-server:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    gpus: all
+    environment:
+      LAYA_DEVICE: cuda
+      LAYA_STRICT_CUDA: "true"
+      LAYA_PRELOAD: english,multilingual,typed-decisions
+      LAYA_MAX_LOADED: "3"
+      LAYA_MAX_CONCURRENCY: "2"
+      CUDA_VISIBLE_DEVICES: "0"
+      # HF_TOKEN: ${HF_TOKEN:-}
+      # LAYA_API_KEY: ${LAYA_API_KEY:-}
+    volumes:
+      - laya-hf-cache:/cache/huggingface
+
+volumes:
+  laya-hf-cache:
