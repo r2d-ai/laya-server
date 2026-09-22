@@ -22,6 +22,14 @@ _MODEL_SUBFOLDERS: dict[str, str | None] = {
     "typed-decisions": "typed-decisions",
 }
 
+_WARMUP_STATE = {"text": "warmup"}
+_WARMUP_QUESTIONS = {
+    "ready": {
+        "type": "noul",
+        "instructions": "Is this a warmup request?",
+    }
+}
+
 
 def _candidate_laya_snapshots() -> list[Path]:
     """Return cached convaiinnovations/laya snapshots, preferring refs/main."""
@@ -86,10 +94,27 @@ class LayaRuntime:
         self._torch: Any | None = None
         self._semaphore: asyncio.Semaphore | None = None
         self._cached_models: list[str] = []
+        self._warmed_models: list[str] = []
 
     @property
     def ready(self) -> bool:
         return self._router is not None
+
+    def _warmup(self, router: Any, model_names: list[str]) -> None:
+        """Force CUDA/Triton initialization before the service becomes ready."""
+        warmed: list[str] = []
+        for name in model_names:
+            logger.info("Warming up Laya model: %s", name)
+            agent = router.load(name)
+            self._assert_agent_device(agent, name)
+            agent.system_one(_WARMUP_STATE, _WARMUP_QUESTIONS)
+            warmed.append(name)
+
+        torch = self._torch
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        self._warmed_models = warmed
 
     def start(self) -> None:
         if self.ready:
@@ -103,6 +128,9 @@ class LayaRuntime:
             raise RuntimeError(
                 "CUDA is required (LAYA_STRICT_CUDA=true) but torch.cuda.is_available() is false"
             )
+
+        self._laya = laya
+        self._torch = torch
 
         preload = settings.preload_models
         model_overrides = _cached_model_overrides()
@@ -122,20 +150,21 @@ class LayaRuntime:
             auto_task_detection=settings.auto_task_detection,
             preload=False,
         )
+
         if preload:
             logger.info("Preloading Laya models on %s: %s", settings.device, ", ".join(preload))
             router.preload(preload)
+            self._warmup(router, list(router.loaded))
 
-        self._laya = laya
-        self._torch = torch
+        # Publish the runtime only after all preload + CUDA/Triton warmup work succeeds.
         self._router = router
         self._semaphore = asyncio.Semaphore(settings.max_concurrency)
 
-        if settings.strict_cuda:
-            for name in list(router.loaded):
-                self._assert_agent_device(router.load(name), name)
-
-        logger.info("Laya runtime ready; loaded=%s", router.loaded)
+        logger.info(
+            "Laya runtime ready; loaded=%s warmed=%s",
+            router.loaded,
+            self._warmed_models,
+        )
 
     async def start_async(self) -> None:
         await asyncio.to_thread(self.start)
@@ -150,6 +179,7 @@ class LayaRuntime:
         self._torch = None
         self._semaphore = None
         self._cached_models = []
+        self._warmed_models = []
 
     def _require_router(self) -> Any:
         if self._router is None:
@@ -261,6 +291,7 @@ class LayaRuntime:
             "gpu": gpu,
             "loaded_models": list(router.loaded),
             "cached_models": self._cached_models,
+            "warmed_models": self._warmed_models,
             "preload_models": settings.preload_models,
             "max_loaded": router.max_loaded,
             "max_concurrency": settings.max_concurrency,

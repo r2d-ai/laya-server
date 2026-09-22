@@ -9,15 +9,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/cache/huggingface \
+    TRITON_CACHE_DIR=/cache/triton \
     PATH=/opt/venv/bin:$PATH \
     CC=/usr/bin/gcc \
     CXX=/usr/bin/g++
 
-# Triton JIT compiles a small native launcher at inference time, so the
-# runtime image must keep a working C/C++ toolchain (not only at image build).
+# Triton JIT compiles native launchers at inference time. Keep both the
+# compiler toolchain and Python development headers in the runtime image.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3 python3-venv python3-pip \
+        python3 python3-dev python3-venv python3-pip \
         ca-certificates curl \
         build-essential \
     && rm -rf /var/lib/apt/lists/* \
@@ -30,7 +31,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install . \
     && useradd --create-home --uid 10001 app \
-    && mkdir -p /cache/huggingface \
+    && mkdir -p /cache/huggingface /cache/triton \
     && chown -R app:app /cache /app
 
 USER app

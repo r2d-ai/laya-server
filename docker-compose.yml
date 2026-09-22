@@ -17,6 +17,9 @@ services:
       LAYA_MAX_LOADED: "3"
       LAYA_MAX_CONCURRENCY: "2"
 
+      # Keep Triton JIT artifacts across container replacement/restart.
+      TRITON_CACHE_DIR: /cache/triton
+
       # GPU exposed by nvidia-container-runtime. Override with e.g.
       # NVIDIA_VISIBLE_DEVICES=0 docker compose up -d
       NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-all}"
@@ -27,6 +30,8 @@ services:
 
     volumes:
       - laya-hf-cache:/cache/huggingface
+      - laya-triton-cache:/cache/triton
 
 volumes:
   laya-hf-cache:
+  laya-triton-cache:
