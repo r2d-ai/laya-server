@@ -9,10 +9,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/cache/huggingface \
-    PATH=/opt/venv/bin:$PATH
+    PATH=/opt/venv/bin:$PATH \
+    CC=/usr/bin/gcc \
+    CXX=/usr/bin/g++
 
+# Triton JIT compiles a small native launcher at inference time, so the
+# runtime image must keep a working C/C++ toolchain (not only at image build).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-venv python3-pip ca-certificates curl \
+    && apt-get install -y --no-install-recommends \
+        python3 python3-venv python3-pip \
+        ca-certificates curl \
+        build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip setuptools wheel \
