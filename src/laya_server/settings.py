@@ -18,18 +18,10 @@ class Settings(BaseSettings):
 
     device: str = "cuda"
     strict_cuda: bool = True
-    preload: str = "english,multilingual,typed-decisions"
-    max_loaded: int = Field(default=3, ge=1, le=3)
-    default_model: str = "english"
-    auto_task_detection: bool = True
     max_concurrency: int = Field(default=2, ge=1, le=64)
 
     hf_token: str | None = None
     api_key: str | None = None
-
-    @property
-    def preload_models(self) -> list[str]:
-        return [item.strip() for item in self.preload.split(",") if item.strip()]
 
 
 @lru_cache(maxsize=1)

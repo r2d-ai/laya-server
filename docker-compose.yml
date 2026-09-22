@@ -5,23 +5,15 @@ services:
     ports:
       - "8000:8000"
 
-    # Use the NVIDIA container runtime directly instead of Compose's `gpus:`
-    # shortcut. Some Docker/Compose versions translate `gpus: all` to CDI
-    # devices, which fails on hosts without generated NVIDIA CDI specs.
     runtime: nvidia
 
     environment:
       LAYA_DEVICE: cuda
       LAYA_STRICT_CUDA: "true"
-      LAYA_PRELOAD: english,multilingual,typed-decisions
-      LAYA_MAX_LOADED: "3"
       LAYA_MAX_CONCURRENCY: "2"
 
-      # Keep Triton JIT artifacts across container replacement/restart.
       TRITON_CACHE_DIR: /cache/triton
 
-      # GPU exposed by nvidia-container-runtime. Override with e.g.
-      # NVIDIA_VISIBLE_DEVICES=0 docker compose up -d
       NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-all}"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
 
