@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from .settings import get_settings
@@ -14,6 +16,68 @@ _PRESET_BUILDERS = {
     "email": "email_questions",
 }
 
+_MODEL_SUBFOLDERS: dict[str, str | None] = {
+    "english": None,
+    "multilingual": "multilingual",
+    "typed-decisions": "typed-decisions",
+}
+
+
+def _candidate_laya_snapshots() -> list[Path]:
+    """Return cached convaiinnovations/laya snapshots, preferring refs/main."""
+    hf_home = Path(os.environ.get("HF_HOME", "~/.cache/huggingface")).expanduser()
+    repo_cache = hf_home / "hub" / "models--convaiinnovations--laya"
+    snapshots = repo_cache / "snapshots"
+    if not snapshots.is_dir():
+        return []
+
+    candidates: list[Path] = []
+    main_ref = repo_cache / "refs" / "main"
+    if main_ref.is_file():
+        try:
+            sha = main_ref.read_text(encoding="utf-8").strip()
+            preferred = snapshots / sha
+            if preferred.is_dir():
+                candidates.append(preferred)
+        except OSError:
+            pass
+
+    try:
+        others = sorted(
+            (p for p in snapshots.iterdir() if p.is_dir() and p not in candidates),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        others = []
+    candidates.extend(others)
+    return candidates
+
+
+def _model_cached(snapshot: Path, subfolder: str | None) -> bool:
+    root = snapshot / subfolder if subfolder else snapshot
+    required = (
+        root / "rl_agent_config.json",
+        root / "model.safetensors",
+        root / "tokenizer",
+        root / "encoder",
+    )
+    return all(path.exists() for path in required)
+
+
+def _cached_model_overrides() -> dict[str, Any]:
+    """Use HF cache snapshot paths directly so Laya skips snapshot_download on restart."""
+    overrides: dict[str, Any] = {}
+    for model_name, subfolder in _MODEL_SUBFOLDERS.items():
+        for snapshot in _candidate_laya_snapshots():
+            if not _model_cached(snapshot, subfolder):
+                continue
+            overrides[model_name] = (
+                (str(snapshot), subfolder) if subfolder else str(snapshot)
+            )
+            break
+    return overrides
+
 
 class LayaRuntime:
     def __init__(self) -> None:
@@ -21,6 +85,7 @@ class LayaRuntime:
         self._laya: Any | None = None
         self._torch: Any | None = None
         self._semaphore: asyncio.Semaphore | None = None
+        self._cached_models: list[str] = []
 
     @property
     def ready(self) -> bool:
@@ -40,7 +105,16 @@ class LayaRuntime:
             )
 
         preload = settings.preload_models
+        model_overrides = _cached_model_overrides()
+        self._cached_models = sorted(model_overrides)
+        if model_overrides:
+            logger.info(
+                "Using cached Laya snapshot directly for: %s",
+                ", ".join(self._cached_models),
+            )
+
         router = laya.Router(
+            models=model_overrides or None,
             device=settings.device,
             token=settings.hf_token,
             max_loaded=max(settings.max_loaded, len(preload) or 1),
@@ -75,6 +149,7 @@ class LayaRuntime:
         self._laya = None
         self._torch = None
         self._semaphore = None
+        self._cached_models = []
 
     def _require_router(self) -> Any:
         if self._router is None:
@@ -185,6 +260,7 @@ class LayaRuntime:
             "cuda_available": cuda_available,
             "gpu": gpu,
             "loaded_models": list(router.loaded),
+            "cached_models": self._cached_models,
             "preload_models": settings.preload_models,
             "max_loaded": router.max_loaded,
             "max_concurrency": settings.max_concurrency,
