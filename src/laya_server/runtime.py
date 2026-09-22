@@ -16,9 +16,11 @@ _PRESET_BUILDERS = {
     "email": "email_questions",
 }
 
-_MODEL_NAME = "multilingual"
-_MODEL_REPO = "convaiinnovations/laya"
-_MODEL_SUBFOLDER = "multilingual"
+_MODEL_SUBFOLDERS: dict[str, str | None] = {
+    "english": None,
+    "multilingual": "multilingual",
+    "typed-decisions": "typed-decisions",
+}
 
 _WARMUP_STATE = {"text": "warmup"}
 _WARMUP_QUESTIONS = {
@@ -60,8 +62,8 @@ def _candidate_laya_snapshots() -> list[Path]:
     return candidates
 
 
-def _model_cached(snapshot: Path) -> bool:
-    root = snapshot / _MODEL_SUBFOLDER
+def _model_cached(snapshot: Path, subfolder: str | None) -> bool:
+    root = snapshot / subfolder if subfolder else snapshot
     required = (
         root / "rl_agent_config.json",
         root / "model.safetensors",
@@ -71,43 +73,48 @@ def _model_cached(snapshot: Path) -> bool:
     return all(path.exists() for path in required)
 
 
-def _cached_multilingual_snapshot() -> Path | None:
-    for snapshot in _candidate_laya_snapshots():
-        if _model_cached(snapshot):
-            return snapshot
-    return None
+def _cached_model_overrides() -> dict[str, Any]:
+    """Use HF cache snapshot paths directly so Laya skips snapshot_download on restart."""
+    overrides: dict[str, Any] = {}
+    for model_name, subfolder in _MODEL_SUBFOLDERS.items():
+        for snapshot in _candidate_laya_snapshots():
+            if not _model_cached(snapshot, subfolder):
+                continue
+            overrides[model_name] = (
+                (str(snapshot), subfolder) if subfolder else str(snapshot)
+            )
+            break
+    return overrides
 
 
 class LayaRuntime:
     def __init__(self) -> None:
-        self._agent: Any | None = None
+        self._router: Any | None = None
         self._laya: Any | None = None
         self._torch: Any | None = None
         self._semaphore: asyncio.Semaphore | None = None
-        self._cached = False
-        self._warmed = False
+        self._cached_models: list[str] = []
+        self._warmed_models: list[str] = []
 
     @property
     def ready(self) -> bool:
-        return self._agent is not None and self._warmed
+        return self._router is not None
 
-    def _validate_model(self, model: str | None) -> None:
-        if model is not None and model.strip().lower() not in {
-            "multilingual",
-            "multi",
-            "ml",
-            "laya-multilingual",
-        }:
-            raise ValueError(
-                f"this server only provides the multilingual checkpoint; got model={model!r}"
-            )
+    def _warmup(self, router: Any, model_names: list[str]) -> None:
+        """Force CUDA/Triton initialization before the service becomes ready."""
+        warmed: list[str] = []
+        for name in model_names:
+            logger.info("Warming up Laya model: %s", name)
+            agent = router.load(name)
+            self._assert_agent_device(agent, name)
+            agent.system_one(_WARMUP_STATE, _WARMUP_QUESTIONS)
+            warmed.append(name)
 
-    def _assert_agent_device(self, agent: Any) -> None:
-        settings = get_settings()
-        if settings.strict_cuda and getattr(getattr(agent, "device", None), "type", None) != "cuda":
-            raise RuntimeError(
-                "Laya multilingual checkpoint fell back to CPU while LAYA_STRICT_CUDA=true"
-            )
+        torch = self._torch
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        self._warmed_models = warmed
 
     def start(self) -> None:
         if self.ready:
@@ -125,56 +132,66 @@ class LayaRuntime:
         self._laya = laya
         self._torch = torch
 
-        snapshot = _cached_multilingual_snapshot()
-        if snapshot is not None:
-            self._cached = True
-            model_source = str(snapshot)
-            logger.info("Loading multilingual checkpoint from persistent HF cache: %s", snapshot)
-        else:
-            self._cached = False
-            model_source = _MODEL_REPO
+        preload = settings.preload_models
+        model_overrides = _cached_model_overrides()
+        self._cached_models = sorted(model_overrides)
+        if model_overrides:
             logger.info(
-                "Multilingual checkpoint not found in cache; downloading %s/%s",
-                _MODEL_REPO,
-                _MODEL_SUBFOLDER,
+                "Using cached Laya snapshot directly for: %s",
+                ", ".join(self._cached_models),
             )
 
-        logger.info("Loading Laya multilingual checkpoint on %s", settings.device)
-        agent = laya.Agent(
-            model_source,
+        router = laya.Router(
+            models=model_overrides or None,
             device=settings.device,
             token=settings.hf_token,
-            subfolder=_MODEL_SUBFOLDER,
+            max_loaded=max(settings.max_loaded, len(preload) or 1),
+            default=settings.default_model,
+            auto_task_detection=settings.auto_task_detection,
+            preload=False,
         )
-        self._assert_agent_device(agent)
-        logger.info("Laya multilingual checkpoint loaded; starting CUDA/Triton warmup")
 
-        agent.system_one(_WARMUP_STATE, _WARMUP_QUESTIONS)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        if preload:
+            logger.info("Preloading Laya models on %s: %s", settings.device, ", ".join(preload))
+            router.preload(preload)
+            self._warmup(router, list(router.loaded))
 
-        self._agent = agent
-        self._warmed = True
+        # Publish the runtime only after all preload + CUDA/Triton warmup work succeeds.
+        self._router = router
         self._semaphore = asyncio.Semaphore(settings.max_concurrency)
-        logger.info("Laya multilingual runtime ready")
+
+        logger.info(
+            "Laya runtime ready; loaded=%s warmed=%s",
+            router.loaded,
+            self._warmed_models,
+        )
 
     async def start_async(self) -> None:
         await asyncio.to_thread(self.start)
 
     def stop(self) -> None:
-        self._agent = None
+        if self._router is not None:
+            self._router.unload()
         if self._torch is not None and self._torch.cuda.is_available():
             self._torch.cuda.empty_cache()
+        self._router = None
         self._laya = None
         self._torch = None
         self._semaphore = None
-        self._cached = False
-        self._warmed = False
+        self._cached_models = []
+        self._warmed_models = []
 
-    def _require_agent(self) -> Any:
-        if self._agent is None:
-            raise RuntimeError("Laya multilingual runtime is not initialized")
-        return self._agent
+    def _require_router(self) -> Any:
+        if self._router is None:
+            raise RuntimeError("Laya runtime is not initialized")
+        return self._router
+
+    def _assert_agent_device(self, agent: Any, model_name: str) -> None:
+        settings = get_settings()
+        if settings.strict_cuda and getattr(getattr(agent, "device", None), "type", None) != "cuda":
+            raise RuntimeError(
+                f"Laya model {model_name!r} fell back to CPU while LAYA_STRICT_CUDA=true"
+            )
 
     def _predict_sync(
         self,
@@ -184,18 +201,12 @@ class LayaRuntime:
         task: str | None,
         lang: str | None,
     ) -> dict[str, Any]:
-        del task, lang
-        self._validate_model(model)
-        agent = self._require_agent()
-        self._assert_agent_device(agent)
+        router = self._require_router()
+        decision = router.route(state, questions, model=model, task=task, lang=lang)
+        agent = router.load(decision["model"])
+        self._assert_agent_device(agent, decision["model"])
         result = agent.system_one(state, questions)
-        result["routing"] = {
-            "model": _MODEL_NAME,
-            "repo": f"{_MODEL_REPO}/{_MODEL_SUBFOLDER}",
-            "reason": "single-model server: multilingual checkpoint is always used",
-            "detection": None,
-            "workflow": None,
-        }
+        result["routing"] = dict(decision)
         return result
 
     async def predict(
@@ -207,7 +218,7 @@ class LayaRuntime:
         lang: str | None = None,
     ) -> dict[str, Any]:
         if self._semaphore is None:
-            raise RuntimeError("Laya multilingual runtime is not initialized")
+            raise RuntimeError("Laya runtime is not initialized")
         async with self._semaphore:
             return await asyncio.to_thread(
                 self._predict_sync, state, questions, model, task, lang
@@ -221,19 +232,15 @@ class LayaRuntime:
         task: str | None = None,
         lang: str | None = None,
     ) -> dict[str, Any]:
-        del state, questions, task, lang
-        self._validate_model(model)
-        return {
-            "model": _MODEL_NAME,
-            "repo": f"{_MODEL_REPO}/{_MODEL_SUBFOLDER}",
-            "reason": "single-model server: multilingual checkpoint is always used",
-            "detection": None,
-            "workflow": None,
-        }
+        router = self._require_router()
+        decision = await asyncio.to_thread(
+            router.route, state, questions, model, task, lang
+        )
+        return dict(decision)
 
     def preset_questions(self, preset: str) -> dict[str, Any]:
         if self._laya is None:
-            raise RuntimeError("Laya multilingual runtime is not initialized")
+            raise RuntimeError("Laya runtime is not initialized")
         try:
             builder_name = _PRESET_BUILDERS[preset]
         except KeyError as exc:
@@ -257,7 +264,7 @@ class LayaRuntime:
         )
 
     def info(self) -> dict[str, Any]:
-        agent = self._require_agent()
+        router = self._require_router()
         torch = self._torch
         laya = self._laya
         settings = get_settings()
@@ -276,17 +283,20 @@ class LayaRuntime:
 
         return {
             "service": "laya-server",
-            "mode": "multilingual-only",
             "laya_version": getattr(laya, "__version__", None),
             "torch_version": getattr(torch, "__version__", None),
-            "device": str(getattr(agent, "device", settings.device)),
+            "device": settings.device,
             "strict_cuda": settings.strict_cuda,
             "cuda_available": cuda_available,
             "gpu": gpu,
-            "loaded_models": [_MODEL_NAME],
-            "cached_models": [_MODEL_NAME] if self._cached else [],
-            "warmed_models": [_MODEL_NAME] if self._warmed else [],
+            "loaded_models": list(router.loaded),
+            "cached_models": self._cached_models,
+            "warmed_models": self._warmed_models,
+            "preload_models": settings.preload_models,
+            "max_loaded": router.max_loaded,
             "max_concurrency": settings.max_concurrency,
+            "default_model": router.default,
+            "auto_task_detection": router.auto_task_detection,
             "presets": sorted(_PRESET_BUILDERS),
         }
 
