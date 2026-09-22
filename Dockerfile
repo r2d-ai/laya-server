@@ -1,4 +1,8 @@
-FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+ARG CUDA_IMAGE=13.0.2-cudnn-runtime-ubuntu24.04
+FROM nvidia/cuda:${CUDA_IMAGE}
+
+ARG TORCH_VERSION=2.14.0
+ARG TORCH_CUDA=cu130
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -12,7 +16,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip setuptools wheel \
-    && /opt/venv/bin/pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cu126
+    && /opt/venv/bin/pip install "torch==${TORCH_VERSION}" --index-url "https://download.pytorch.org/whl/${TORCH_CUDA}"
 
 WORKDIR /app
 COPY pyproject.toml README.md ./
